@@ -4,12 +4,6 @@ import { chromium } from "playwright";
 import { execSync } from "child_process";
 import cron from "node-cron";
 import pg from "pg";
-import fs from "fs";
-import path from "path";
-import { fileURLToPath } from "url";
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
 
 const { Pool } = pg;
 const app = express();
@@ -678,14 +672,8 @@ app.get("/admin", async (_req, res) => {
     if (q.ok === "1") return '<div class="msg ok">✅ Rastreamento cadastrado com sucesso.</div>';
     if (q.ok === "editado") return '<div class="msg ok">✏️ Rastreamento atualizado com sucesso.</div>';
     if (q.ok === "removido") return '<div class="msg ok">🗑️ Rastreamento removido.</div>';
-    if (q.ok === "csv-importado") return `<div class="msg ok">✅ Importação do Swipe File concluída! <strong>${q.paginas || 0} Bibliotecas</strong> e <strong>${q.dominios || 0} Domínios</strong> importados no NEON.</div>`;
     if (q.erro === "campos-obrigatorios") return '<div class="msg err">⚠️ Nome e URL são obrigatórios.</div>';
     if (q.erro === "nome-invalido") return '<div class="msg err">⚠️ Nome inválido.</div>';
-    if (q.erro === "csv-nao-encontrado") return '<div class="msg err">⚠️ Arquivo CSV de marcas não encontrado no servidor.</div>';
-    if (q.erro === "erro-importacao") {
-      const detalhe = q.detalhe ? `<br><small style="color:#ffb3c1;display:block;margin-top:6px;font-family:'Space Mono',monospace">🔍 Detalhe técnico: ${escAttr(q.detalhe)}</small>` : "";
-      return `<div class="msg err">⚠️ Erro ao importar dados do CSV.${detalhe}</div>`;
-    }
     if (q.erro === "lote-vazio") return '<div class="msg err">⚠️ Nenhum item enviado no lote.</div>';
     if (q.erro === "lote-invalido") return '<div class="msg err">⚠️ Nenhuma linha válida encontrada no lote.</div>';
     if (q.erro === "lote-em-andamento") return '<div class="msg err">⚠️ Já existe um lote em andamento. Aguarde terminar.</div>';
@@ -753,10 +741,7 @@ td{padding:11px 14px;border-bottom:1px solid var(--border);vertical-align:middle
 <body>
 <div class="hdr">
   <h1>⚙️ Admin — DTC Monitor</h1>
-  <div style="margin-left:auto;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
-    <form method="POST" action="/admin/importar-swipefile" style="display:inline" onsubmit="return confirm('Deseja importar todas as marcas do arquivo CSV para o banco de dados NEON?')">
-      <button type="submit" style="font-size:13px;color:#fbbf24;background:rgba(251,191,36,.12);border:1px solid rgba(251,191,36,.35);padding:7px 16px;border-radius:8px;cursor:pointer;font-family:'Space Grotesk',sans-serif;font-weight:600;transition:all .2s">📥 Importar Marcas (CSV)</button>
-    </form>
+  <div style="margin-left:auto;display:flex;gap:8px;flex-wrap:wrap">
     <a href="/dashboard" style="font-size:13px;color:var(--accent);text-decoration:none;border:1px solid var(--accent);padding:7px 16px;border-radius:8px">← Ver Dashboard</a>
     <a href="/funis" style="font-size:13px;color:var(--accent);text-decoration:none;border:1px solid var(--accent);padding:7px 16px;border-radius:8px">🔀 Ver Mapa de Funis</a>
   </div>
@@ -988,126 +973,7 @@ app.post("/admin/remover", async (req, res) => {
   res.redirect("/admin?ok=removido");
 });
 
-app.post("/admin/importar-swipefile", async (_req, res) => {
-  try {
-    // Busca flexível pelo arquivo CSV para evitar problemas de encoding do caractere bullet (•) em servidores Linux (Render)
-    let csvPath = path.join(__dirname, "DTC USA BRANDS • SWIPE FILE - Marcas.csv");
-    if (!fs.existsSync(csvPath)) {
-      const arquivos = fs.readdirSync(__dirname);
-      const enc = arquivos.find(a => a.includes("SWIPE FILE") && a.endsWith(".csv") || a.includes("Marcas.csv"));
-      if (enc) {
-        csvPath = path.join(__dirname, enc);
-      } else {
-        return res.redirect("/admin?erro=csv-nao-encontrado");
-      }
-    }
 
-    // Garante no banco que as colunas e tabelas existem antes de rodar os inserts
-    await query(`ALTER TABLE pages ADD COLUMN IF NOT EXISTS brand TEXT`).catch(e => console.warn("Aviso coluna brand:", e.message));
-    await query(`ALTER TABLE pages ADD COLUMN IF NOT EXISTS tipo TEXT NOT NULL DEFAULT 'pagina'`).catch(() => {});
-    await query(`ALTER TABLE pages ADD COLUMN IF NOT EXISTS nicho TEXT`).catch(() => {});
-    await query(`CREATE TABLE IF NOT EXISTS brands (id SERIAL PRIMARY KEY, nome TEXT UNIQUE NOT NULL, site TEXT, created_at TIMESTAMP NOT NULL DEFAULT NOW())`).catch(() => {});
-
-    const content = fs.readFileSync(csvPath, "utf8");
-    const lines = content.split(/\r?\n/);
-    let salvosPaginas = 0;
-    let salvosDominios = 0;
-    let primeiroErro = null;
-
-    for (let i = 0; i < lines.length; i++) {
-      const line = lines[i].trim();
-      if (!line || line.startsWith("👉") || line.startsWith(",,,,") || line.startsWith("CATEGORY,")) continue;
-      
-      const cols = [];
-      let cur = "";
-      let inQuotes = false;
-      for (let c = 0; c < line.length; c++) {
-        const char = line[c];
-        if (char === '"') {
-          inQuotes = !inQuotes;
-        } else if (char === ',' && !inQuotes) {
-          cols.push(cur.trim());
-          cur = "";
-        } else {
-          cur += char;
-        }
-      }
-      cols.push(cur.trim());
-
-      const category = cols[0] || "";
-      const subcategory = cols[1] || "";
-      const brand = cols[2] || "";
-      const site = cols[3] || "";
-      const biblioteca = cols[4] || "";
-
-      if (!brand || !biblioteca) continue;
-
-      const nicho = subcategory ? `${category} — ${subcategory}` : category;
-
-      // 1. Salvar a BIBLIOTECA (tipo = 'pagina') de forma isolada em try/catch
-      const slugPag = toSlug(brand + "-lib");
-      if (slugPag) {
-        try {
-          await query(
-            `INSERT INTO pages (slug, nome, url, tipo, instagram_url, geo, nicho, funil, brand)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-             ON CONFLICT (slug) DO UPDATE
-               SET nome = EXCLUDED.nome,
-                   url = EXCLUDED.url,
-                   tipo = EXCLUDED.tipo,
-                   nicho = COALESCE(EXCLUDED.nicho, pages.nicho),
-                   brand = COALESCE(EXCLUDED.brand, pages.brand)`,
-            [slugPag, brand, biblioteca, "pagina", null, "US", nicho || null, null, brand]
-          );
-          salvosPaginas++;
-        } catch (errLinha) {
-          console.error(`[CSV IMPORT] Erro em slugPag=${slugPag}:`, errLinha.message);
-          if (!primeiroErro) primeiroErro = `${brand}: ${errLinha.message}`;
-        }
-      }
-
-      // 2. Salvar o SITE oficial (tipo = 'dominio') se houver URL válida
-      if (site && site.startsWith("http")) {
-        const slugDom = toSlug(brand + "-site");
-        if (slugDom) {
-          try {
-            await query(
-              `INSERT INTO pages (slug, nome, url, tipo, instagram_url, geo, nicho, funil, brand)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-               ON CONFLICT (slug) DO UPDATE
-                 SET nome = EXCLUDED.nome,
-                     url = EXCLUDED.url,
-                     tipo = EXCLUDED.tipo,
-                     nicho = COALESCE(EXCLUDED.nicho, pages.nicho),
-                     brand = COALESCE(EXCLUDED.brand, pages.brand)`,
-              [slugDom, brand + " (Site)", site, "dominio", null, "US", nicho || null, null, brand]
-            );
-            salvosDominios++;
-          } catch (errLinha) {
-            console.error(`[CSV IMPORT] Erro em slugDom=${slugDom}:`, errLinha.message);
-            if (!primeiroErro) primeiroErro = `${brand} (Site): ${errLinha.message}`;
-          }
-        }
-      }
-
-      // 3. Salvar também no catálogo geral brands
-      await query(
-        `INSERT INTO brands (nome, site) VALUES ($1, $2) ON CONFLICT (nome) DO UPDATE SET site=EXCLUDED.site`,
-        [brand, site || null]
-      ).catch(() => {});
-    }
-
-    console.log(`[CSV IMPORT] Sucesso! Páginas: ${salvosPaginas}, Domínios: ${salvosDominios}, Erros: ${primeiroErro || "Nenhum"}`);
-    if (salvosPaginas === 0 && salvosDominios === 0 && primeiroErro) {
-      return res.redirect(`/admin?erro=erro-importacao&detalhe=${encodeURIComponent(primeiroErro.slice(0, 200))}`);
-    }
-    const avisoUrl = primeiroErro ? `&detalhe=${encodeURIComponent(primeiroErro.slice(0, 150))}` : "";
-    return res.redirect(`/admin?ok=csv-importado&paginas=${salvosPaginas}&dominios=${salvosDominios}${avisoUrl}`);
-  } catch (err) {
-    console.error("[CSV IMPORT] Erro fatal:", err.message);
-    return res.redirect(`/admin?erro=erro-importacao&detalhe=${encodeURIComponent(err.message.slice(0, 200))}`);
-  }
-});
 
 app.post("/admin/lote", async (req, res) => {
   const { itens: textoItens } = req.body;
