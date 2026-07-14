@@ -4,6 +4,12 @@ import { chromium } from "playwright";
 import { execSync } from "child_process";
 import cron from "node-cron";
 import pg from "pg";
+import fs from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const { Pool } = pg;
 const app = express();
@@ -984,9 +990,6 @@ app.post("/admin/remover", async (req, res) => {
 
 app.post("/admin/importar-swipefile", async (_req, res) => {
   try {
-    const fs = require("fs");
-    const path = require("path");
-    
     // Busca flexível pelo arquivo CSV para evitar problemas de encoding do caractere bullet (•) em servidores Linux (Render)
     let csvPath = path.join(__dirname, "DTC USA BRANDS • SWIPE FILE - Marcas.csv");
     if (!fs.existsSync(csvPath)) {

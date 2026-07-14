@@ -1,14 +1,20 @@
 /**
  * importar_marcas_neon.js
  * Script de importação em lote das 57 marcas do arquivo CSV para o banco NEON.
+ * Compatível com ES Modules (type: module no package.json).
  * 
  * Uso via terminal:
  *   node importar_marcas_neon.js
  */
 
-const fs = require("fs");
-const path = require("path");
-const { Pool } = require("pg");
+import fs from "fs";
+import path from "path";
+import pg from "pg";
+import { fileURLToPath } from "url";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const { Pool } = pg;
 
 if (!process.env.DATABASE_URL) {
   console.error("❌ ERRO: A variável de ambiente DATABASE_URL não foi encontrada!");
@@ -42,12 +48,24 @@ async function query(sql, params = []) {
 
 async function importar() {
   console.log("🚀 Iniciando importação do arquivo CSV para o NEON...");
-  const csvPath = path.join(__dirname, "DTC USA BRANDS • SWIPE FILE - Marcas.csv");
+  let csvPath = path.join(__dirname, "DTC USA BRANDS • SWIPE FILE - Marcas.csv");
   
   if (!fs.existsSync(csvPath)) {
-    console.error("❌ ERRO: Arquivo CSV não encontrado no caminho:", csvPath);
-    process.exit(1);
+    const arquivos = fs.readdirSync(__dirname);
+    const enc = arquivos.find(a => a.includes("SWIPE FILE") && a.endsWith(".csv") || a.includes("Marcas.csv"));
+    if (enc) {
+      csvPath = path.join(__dirname, enc);
+    } else {
+      console.error("❌ ERRO: Arquivo CSV não encontrado na pasta:", __dirname);
+      process.exit(1);
+    }
   }
+
+  // Garante colunas no banco
+  await query(`ALTER TABLE pages ADD COLUMN IF NOT EXISTS brand TEXT`).catch(() => {});
+  await query(`ALTER TABLE pages ADD COLUMN IF NOT EXISTS tipo TEXT NOT NULL DEFAULT 'pagina'`).catch(() => {});
+  await query(`ALTER TABLE pages ADD COLUMN IF NOT EXISTS nicho TEXT`).catch(() => {});
+  await query(`CREATE TABLE IF NOT EXISTS brands (id SERIAL PRIMARY KEY, nome TEXT UNIQUE NOT NULL, site TEXT, created_at TIMESTAMP NOT NULL DEFAULT NOW())`).catch(() => {});
 
   const content = fs.readFileSync(csvPath, "utf8");
   const lines = content.split(/\r?\n/);
@@ -59,7 +77,6 @@ async function importar() {
     const line = lines[i].trim();
     if (!line || line.startsWith("👉") || line.startsWith(",,,,") || line.startsWith("CATEGORY,")) continue;
     
-    // Parser seguro para colunas com e sem aspas
     const cols = [];
     let cur = "";
     let inQuotes = false;
@@ -89,38 +106,49 @@ async function importar() {
     // 1. Salvar a BIBLIOTECA (tipo = 'pagina')
     const slugPag = toSlug(brand + "-lib");
     if (slugPag) {
-      await query(
-        `INSERT INTO pages (slug, nome, url, tipo, instagram_url, geo, nicho, funil, brand)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-         ON CONFLICT (slug) DO UPDATE
-           SET nome=$2, url=$3, tipo=$4,
-               nicho=COALESCE(EXCLUDED.nicho, pages.nicho),
-               brand=COALESCE(EXCLUDED.brand, pages.brand)`,
-        [slugPag, brand, biblioteca, "pagina", null, "US", nicho || null, null, brand]
-      );
-      salvosPaginas++;
-      console.log(`  📡 [PÁGINA] Salvo: ${brand} (${slugPag})`);
-    }
-
-    // 2. Salvar o SITE oficial (tipo = 'dominio') se houver URL válida
-    if (site && site.startsWith("http")) {
-      const slugDom = toSlug(brand + "-site");
-      if (slugDom) {
+      try {
         await query(
           `INSERT INTO pages (slug, nome, url, tipo, instagram_url, geo, nicho, funil, brand)
            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
            ON CONFLICT (slug) DO UPDATE
-             SET nome=$2, url=$3, tipo=$4,
-                 nicho=COALESCE(EXCLUDED.nicho, pages.nicho),
-                 brand=COALESCE(EXCLUDED.brand, pages.brand)`,
-          [slugDom, brand + " (Site)", site, "dominio", null, "US", nicho || null, null, brand]
+             SET nome = EXCLUDED.nome,
+                 url = EXCLUDED.url,
+                 tipo = EXCLUDED.tipo,
+                 nicho = COALESCE(EXCLUDED.nicho, pages.nicho),
+                 brand = COALESCE(EXCLUDED.brand, pages.brand)`,
+          [slugPag, brand, biblioteca, "pagina", null, "US", nicho || null, null, brand]
         );
-        salvosDominios++;
-        console.log(`  🌐 [DOMÍNIO] Salvo: ${brand} (${slugDom})`);
+        salvosPaginas++;
+        console.log(`  📡 [PÁGINA] Salvo: ${brand} (${slugPag})`);
+      } catch (e) {
+        console.error(`  ❌ [PÁGINA] Erro ao salvar ${brand}: ${e.message}`);
       }
     }
 
-    // 3. Salvar também no catálogo geral brands
+    // 2. Salvar o SITE oficial (tipo = 'dominio')
+    if (site && site.startsWith("http")) {
+      const slugDom = toSlug(brand + "-site");
+      if (slugDom) {
+        try {
+          await query(
+            `INSERT INTO pages (slug, nome, url, tipo, instagram_url, geo, nicho, funil, brand)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+             ON CONFLICT (slug) DO UPDATE
+               SET nome = EXCLUDED.nome,
+                   url = EXCLUDED.url,
+                   tipo = EXCLUDED.tipo,
+                   nicho = COALESCE(EXCLUDED.nicho, pages.nicho),
+                   brand = COALESCE(EXCLUDED.brand, pages.brand)`,
+            [slugDom, brand + " (Site)", site, "dominio", null, "US", nicho || null, null, brand]
+          );
+          salvosDominios++;
+          console.log(`  🌐 [DOMÍNIO] Salvo: ${brand} (${slugDom})`);
+        } catch (e) {
+          console.error(`  ❌ [DOMÍNIO] Erro ao salvar site ${brand}: ${e.message}`);
+        }
+      }
+    }
+
     await query(
       `INSERT INTO brands (nome, site) VALUES ($1, $2) ON CONFLICT (nome) DO UPDATE SET site=EXCLUDED.site`,
       [brand, site || null]
@@ -130,7 +158,6 @@ async function importar() {
   console.log("\n🎉 IMPORTAÇÃO CONCLUÍDA COM SUCESSO!");
   console.log(`📡 Total de Bibliotecas (tipo 'pagina') salvas: ${salvosPaginas}`);
   console.log(`🌐 Total de Domínios (tipo 'dominio') salvos: ${salvosDominios}`);
-  console.log("\n💡 Agora você pode rodar '/api/coletar-tudo' para fazer a fotografia inicial ou aguardar o CRON rodar!");
   await pool.end();
 }
 
