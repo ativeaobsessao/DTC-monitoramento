@@ -1,4 +1,4 @@
-# VIVA Labs — Meta Ads Library Monitor
+# DTC Monitor — Meta Ads Library Monitor
 
 Scraper para monitorar anúncios ativos na Biblioteca de Anúncios do Meta.
 
