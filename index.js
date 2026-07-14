@@ -71,6 +71,16 @@ async function initDb() {
   await query(`ALTER TABLE pages ADD COLUMN IF NOT EXISTS geo TEXT`);
   await query(`ALTER TABLE pages ADD COLUMN IF NOT EXISTS nicho TEXT`);
   await query(`ALTER TABLE pages ADD COLUMN IF NOT EXISTS funil TEXT`);
+  await query(`ALTER TABLE pages ADD COLUMN IF NOT EXISTS brand TEXT`);
+
+  await query(`
+    CREATE TABLE IF NOT EXISTS brands (
+      id           SERIAL PRIMARY KEY,
+      nome         TEXT UNIQUE NOT NULL,
+      site         TEXT,
+      created_at   TIMESTAMP NOT NULL DEFAULT NOW()
+    )
+  `);
 
   await query(`
     CREATE TABLE IF NOT EXISTS funnel_nodes (
@@ -492,21 +502,22 @@ async function runAllScrapes(trigger = "cron") {
 app.get("/api/healthz", (_req, res) => res.json({ status: "ok", ts: new Date().toISOString() }));
 
 app.post("/api/salvar", async (req, res) => {
-  const { nome, url, tipo, instagram_url, geo, nicho, funil, ads_count_inicial } = req.body;
+  const { nome, url, tipo, instagram_url, geo, nicho, funil, brand, ads_count_inicial } = req.body;
   if (!nome || !url) return res.status(400).json({ error: "Fields 'nome' and 'url' are required." });
   const slug = toSlug(nome);
   if (!slug) return res.status(400).json({ error: "Could not generate a valid slug." });
   const tipoFinal = tipo === "dominio" ? "dominio" : "pagina";
   await query(
-    `INSERT INTO pages (slug, nome, url, tipo, instagram_url, geo, nicho, funil)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+    `INSERT INTO pages (slug, nome, url, tipo, instagram_url, geo, nicho, funil, brand)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
      ON CONFLICT (slug) DO UPDATE
        SET nome=$2, url=$3, tipo=$4,
            instagram_url=COALESCE(EXCLUDED.instagram_url, pages.instagram_url),
            geo=COALESCE(EXCLUDED.geo, pages.geo),
            nicho=COALESCE(EXCLUDED.nicho, pages.nicho),
-           funil=COALESCE(EXCLUDED.funil, pages.funil)`,
-    [slug, nome, url, tipoFinal, instagram_url || null, geo || null, nicho || null, funil || null]
+           funil=COALESCE(EXCLUDED.funil, pages.funil),
+           brand=COALESCE(EXCLUDED.brand, pages.brand)`,
+    [slug, nome, url, tipoFinal, instagram_url || null, geo || null, nicho || null, funil || null, brand || null]
   );
   console.log(`[SALVAR] registered slug=${slug} tipo=${tipoFinal}`);
 
@@ -604,7 +615,7 @@ app.get("/api/status", async (_req, res) => {
 });
 
 app.get("/api/paginas", async (_req, res) => {
-  const { rows } = await query("SELECT slug, nome, url, tipo, instagram_url, geo, nicho, funil FROM pages");
+  const { rows } = await query("SELECT slug, nome, url, tipo, instagram_url, geo, nicho, funil, brand FROM pages");
   res.json(rows);
 });
 
@@ -612,7 +623,7 @@ app.get("/api/paginas", async (_req, res) => {
 
 app.get("/admin", async (_req, res) => {
   const { rows: pages } = await query(
-    "SELECT slug, nome, url, tipo, instagram_url, geo, nicho, funil, created_at FROM pages ORDER BY tipo, created_at DESC"
+    "SELECT slug, nome, url, tipo, instagram_url, geo, nicho, funil, brand, created_at FROM pages ORDER BY tipo, created_at DESC"
   );
 
   // JSON de cada item, embutido no atributo data-item, usado pelo JS para preencher o formulário ao clicar em Editar
@@ -626,6 +637,7 @@ app.get("/admin", async (_req, res) => {
       <td class="nome-cell">
         <div class="nome">${p.nome}</div>
         <div class="meta-badges">
+          ${p.brand ? `<span class="meta-tag" style="background:rgba(251,191,36,.12);color:#fbbf24">🏢 ${p.brand}</span>` : ""}
           ${p.geo ? `<span class="meta-tag">🌍 ${p.geo}</span>` : ""}
           ${p.nicho ? `<span class="meta-tag">🏷️ ${p.nicho}</span>` : ""}
           ${p.funil ? `<span class="meta-tag">🎯 ${p.funil}</span>` : ""}
@@ -645,6 +657,7 @@ app.get("/admin", async (_req, res) => {
           data-geo="${escAttr(p.geo)}"
           data-nicho="${escAttr(p.nicho)}"
           data-funil="${escAttr(p.funil)}"
+          data-brand="${escAttr(p.brand)}"
           onclick="editarItem(this)">✏️ Editar</button>
         <a href="/admin/funis/${p.slug}" class="btn-funis">🔀 Funis</a>
         <form method="POST" action="/admin/remover" style="display:inline" onsubmit="return confirm('Remover ${p.nome}?')">
@@ -659,8 +672,11 @@ app.get("/admin", async (_req, res) => {
     if (q.ok === "1") return '<div class="msg ok">✅ Rastreamento cadastrado com sucesso.</div>';
     if (q.ok === "editado") return '<div class="msg ok">✏️ Rastreamento atualizado com sucesso.</div>';
     if (q.ok === "removido") return '<div class="msg ok">🗑️ Rastreamento removido.</div>';
+    if (q.ok === "csv-importado") return `<div class="msg ok">✅ Importação do Swipe File concluída! <strong>${q.paginas || 0} Bibliotecas</strong> e <strong>${q.dominios || 0} Domínios</strong> importados no NEON.</div>`;
     if (q.erro === "campos-obrigatorios") return '<div class="msg err">⚠️ Nome e URL são obrigatórios.</div>';
     if (q.erro === "nome-invalido") return '<div class="msg err">⚠️ Nome inválido.</div>';
+    if (q.erro === "csv-nao-encontrado") return '<div class="msg err">⚠️ Arquivo CSV de marcas não encontrado no servidor.</div>';
+    if (q.erro === "erro-importacao") return '<div class="msg err">⚠️ Erro ao importar dados do CSV. Verifique os logs.</div>';
     if (q.erro === "lote-vazio") return '<div class="msg err">⚠️ Nenhum item enviado no lote.</div>';
     if (q.erro === "lote-invalido") return '<div class="msg err">⚠️ Nenhuma linha válida encontrada no lote.</div>';
     if (q.erro === "lote-em-andamento") return '<div class="msg err">⚠️ Já existe um lote em andamento. Aguarde terminar.</div>';
@@ -687,7 +703,8 @@ body{background:var(--bg);color:var(--text);font-family:'Space Grotesk',sans-ser
 .form-row{display:grid;grid-template-columns:160px 1fr 1fr;gap:12px;align-items:end;margin-bottom:12px}
 .form-row-2{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px}
 .form-row-3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-bottom:12px}
-@media(max-width:700px){.form-row,.form-row-2,.form-row-3{grid-template-columns:1fr}}
+.form-row-4{display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:12px;margin-bottom:12px}
+@media(max-width:700px){.form-row,.form-row-2,.form-row-3,.form-row-4{grid-template-columns:1fr}}
 .field{display:flex;flex-direction:column;gap:6px}
 label{font-size:11px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.5px}
 .label-optional{font-size:10px;color:var(--muted);font-weight:400;text-transform:none;letter-spacing:0;margin-left:4px;opacity:.7}
@@ -727,7 +744,10 @@ td{padding:11px 14px;border-bottom:1px solid var(--border);vertical-align:middle
 <body>
 <div class="hdr">
   <h1>⚙️ Admin — DTC Monitor</h1>
-  <div style="margin-left:auto;display:flex;gap:8px;flex-wrap:wrap">
+  <div style="margin-left:auto;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+    <form method="POST" action="/admin/importar-swipefile" style="display:inline" onsubmit="return confirm('Deseja importar todas as marcas do arquivo CSV para o banco de dados NEON?')">
+      <button type="submit" style="font-size:13px;color:#fbbf24;background:rgba(251,191,36,.12);border:1px solid rgba(251,191,36,.35);padding:7px 16px;border-radius:8px;cursor:pointer;font-family:'Space Grotesk',sans-serif;font-weight:600;transition:all .2s">📥 Importar Marcas (CSV)</button>
+    </form>
     <a href="/dashboard" style="font-size:13px;color:var(--accent);text-decoration:none;border:1px solid var(--accent);padding:7px 16px;border-radius:8px">← Ver Dashboard</a>
     <a href="/funis" style="font-size:13px;color:var(--accent);text-decoration:none;border:1px solid var(--accent);padding:7px 16px;border-radius:8px">🔀 Ver Mapa de Funis</a>
   </div>
@@ -760,7 +780,11 @@ ${msgOk}
     <hr class="divider">
     <div style="font-size:11px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:12px">Informações adicionais <span style="font-weight:400;text-transform:none;letter-spacing:0;opacity:.6">(opcionais)</span></div>
 
-    <div class="form-row-3">
+    <div class="form-row-4">
+      <div class="field">
+        <label>Brand (Marca) <span class="label-optional">opcional</span></label>
+        <input type="text" name="brand" id="brandInput" placeholder="Ex: My Nuora, Create Wellness">
+      </div>
       <div class="field">
         <label>Instagram <span class="label-optional">opcional</span></label>
         <input type="url" name="instagram_url" id="instagramInput" placeholder="https://www.instagram.com/perfil">
@@ -847,6 +871,7 @@ function editarItem(btn){
   document.getElementById('instagramInput').value=btn.dataset.instagram;
   document.getElementById('geoInput').value=btn.dataset.geo;
   document.getElementById('nichoInput').value=btn.dataset.nicho;
+  document.getElementById('brandInput').value=btn.dataset.brand;
   document.getElementById('form-title').textContent='✏️ Editando: '+btn.dataset.nome;
   document.getElementById('submitBtn').textContent='Salvar alterações';
   document.getElementById('cancelBtn').style.display='inline-block';
@@ -895,7 +920,7 @@ function cancelarEdicao(){
 });
 
 app.post("/admin/salvar", async (req, res) => {
-  const { nome, url, tipo, instagram_url, geo, nicho, funil, original_slug } = req.body;
+  const { nome, url, tipo, instagram_url, geo, nicho, funil, brand, original_slug } = req.body;
   if (!nome || !url) return res.redirect("/admin?erro=campos-obrigatorios");
   const tipoFinal = tipo === "dominio" ? "dominio" : "pagina";
 
@@ -904,8 +929,8 @@ app.post("/admin/salvar", async (req, res) => {
   if (original_slug && original_slug.trim()) {
     try {
       const { rowCount } = await query(
-        `UPDATE pages SET nome=$1, url=$2, tipo=$3, instagram_url=$4, geo=$5, nicho=$6, funil=$7 WHERE slug=$8`,
-        [nome, url, tipoFinal, instagram_url || null, geo || null, nicho || null, funil || null, original_slug.trim()]
+        `UPDATE pages SET nome=$1, url=$2, tipo=$3, instagram_url=$4, geo=$5, nicho=$6, funil=$7, brand=$8 WHERE slug=$9`,
+        [nome, url, tipoFinal, instagram_url || null, geo || null, nicho || null, funil || null, brand || null, original_slug.trim()]
       );
       if (rowCount === 0) {
         console.warn(`[ADMIN] edição falhou — slug=${original_slug} não encontrado`);
@@ -924,15 +949,16 @@ app.post("/admin/salvar", async (req, res) => {
   if (!slug) return res.redirect("/admin?erro=nome-invalido");
   try {
     await query(
-      `INSERT INTO pages (slug, nome, url, tipo, instagram_url, geo, nicho, funil)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+      `INSERT INTO pages (slug, nome, url, tipo, instagram_url, geo, nicho, funil, brand)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
        ON CONFLICT (slug) DO UPDATE
          SET nome=$2, url=$3, tipo=$4,
              instagram_url=COALESCE(EXCLUDED.instagram_url, pages.instagram_url),
              geo=COALESCE(EXCLUDED.geo, pages.geo),
              nicho=COALESCE(EXCLUDED.nicho, pages.nicho),
-             funil=COALESCE(EXCLUDED.funil, pages.funil)`,
-      [slug, nome, url, tipoFinal, instagram_url || null, geo || null, nicho || null, funil || null]
+             funil=COALESCE(EXCLUDED.funil, pages.funil),
+             brand=COALESCE(EXCLUDED.brand, pages.brand)`,
+      [slug, nome, url, tipoFinal, instagram_url || null, geo || null, nicho || null, funil || null, brand || null]
     );
     console.log(`[ADMIN] cadastrou slug=${slug} tipo=${tipoFinal}`);
     await captureInicial(slug, url);
@@ -951,6 +977,96 @@ app.post("/admin/remover", async (req, res) => {
   await query("DELETE FROM scrape_latest WHERE slug=$1", [slug]);
   console.log(`[ADMIN] removeu slug=${slug}`);
   res.redirect("/admin?ok=removido");
+});
+
+app.post("/admin/importar-swipefile", async (_req, res) => {
+  try {
+    const fs = require("fs");
+    const path = require("path");
+    const csvPath = path.join(__dirname, "DTC USA BRANDS • SWIPE FILE - Marcas.csv");
+    if (!fs.existsSync(csvPath)) {
+      return res.redirect("/admin?erro=csv-nao-encontrado");
+    }
+    const content = fs.readFileSync(csvPath, "utf8");
+    const lines = content.split(/\r?\n/);
+    let salvosPaginas = 0;
+    let salvosDominios = 0;
+
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i].trim();
+      if (!line || line.startsWith("👉") || line.startsWith(",,,,") || line.startsWith("CATEGORY,")) continue;
+      
+      const cols = [];
+      let cur = "";
+      let inQuotes = false;
+      for (let c = 0; c < line.length; c++) {
+        const char = line[c];
+        if (char === '"') {
+          inQuotes = !inQuotes;
+        } else if (char === ',' && !inQuotes) {
+          cols.push(cur.trim());
+          cur = "";
+        } else {
+          cur += char;
+        }
+      }
+      cols.push(cur.trim());
+
+      const category = cols[0] || "";
+      const subcategory = cols[1] || "";
+      const brand = cols[2] || "";
+      const site = cols[3] || "";
+      const biblioteca = cols[4] || "";
+
+      if (!brand || !biblioteca) continue;
+
+      const nicho = subcategory ? `${category} — ${subcategory}` : category;
+
+      // 1. Salvar a BIBLIOTECA (tipo = 'pagina')
+      const slugPag = toSlug(brand + "-lib");
+      if (slugPag) {
+        await query(
+          `INSERT INTO pages (slug, nome, url, tipo, instagram_url, geo, nicho, funil, brand)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+           ON CONFLICT (slug) DO UPDATE
+             SET nome=$2, url=$3, tipo=$4,
+                 nicho=COALESCE(EXCLUDED.nicho, pages.nicho),
+                 brand=COALESCE(EXCLUDED.brand, pages.brand)`,
+          [slugPag, brand, biblioteca, "pagina", null, "US", nicho || null, null, brand]
+        );
+        salvosPaginas++;
+      }
+
+      // 2. Salvar o SITE oficial (tipo = 'dominio') se houver URL válida
+      if (site && site.startsWith("http")) {
+        const slugDom = toSlug(brand + "-site");
+        if (slugDom) {
+          await query(
+            `INSERT INTO pages (slug, nome, url, tipo, instagram_url, geo, nicho, funil, brand)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+             ON CONFLICT (slug) DO UPDATE
+               SET nome=$2, url=$3, tipo=$4,
+                   nicho=COALESCE(EXCLUDED.nicho, pages.nicho),
+                   brand=COALESCE(EXCLUDED.brand, pages.brand)`,
+            [slugDom, brand + " (Site)", site, "dominio", null, "US", nicho || null, null, brand]
+          );
+          salvosDominios++;
+        }
+      }
+
+      // 3. Salvar também no catálogo geral brands
+      await query(
+        `INSERT INTO brands (nome, site) VALUES ($1, $2) ON CONFLICT (nome) DO UPDATE SET site=EXCLUDED.site`,
+        [brand, site || null]
+      ).catch(() => {});
+    }
+
+    console.log(`[CSV IMPORT] Sucesso! Páginas (Bibliotecas): ${salvosPaginas}, Domínios (Sites): ${salvosDominios}`);
+    return res.redirect(`/admin?ok=csv-importado&paginas=${salvosPaginas}&dominios=${salvosDominios}`);
+  } catch (err) {
+    console.error("[CSV IMPORT] Erro:", err.message);
+    return res.redirect("/admin?erro=erro-importacao");
+  }
 });
 
 app.post("/admin/lote", async (req, res) => {
@@ -1914,7 +2030,7 @@ const IG_SVG = `<svg width="18" height="18" viewBox="0 0 24 24" xmlns="http://ww
 app.get("/dashboard", async (_req, res) => {
   try {
     const { rows: allPages } = await query(
-      "SELECT slug, nome, url, tipo, created_at, inicial_count, instagram_url, geo, nicho, funil FROM pages"
+      "SELECT slug, nome, url, tipo, created_at, inicial_count, instagram_url, geo, nicho, funil, brand FROM pages"
     );
 
     const BR_OFFSET_MS = 3 * 60 * 60 * 1000;
@@ -1965,6 +2081,7 @@ app.get("/dashboard", async (_req, res) => {
           geo:           p.geo || null,
           nicho:         p.nicho || null,
           funil:         p.funil || null,
+          brand:         p.brand || null,
         };
 
         paginas[p.nome] = {};
@@ -2087,6 +2204,7 @@ td{padding:11px 16px;border-top:1px solid var(--border);color:var(--text2);white
 tbody tr:hover td{background:var(--surface2)}
 .t-name{font-weight:600;color:#fff;white-space:normal}
 .t-name-main{display:block;font-weight:600;color:#fff;margin-bottom:4px}
+.t-brand{font-weight:600;color:#fbbf24;white-space:nowrap}
 .t-meta-badges{display:flex;flex-wrap:wrap;gap:4px;margin-top:3px}
 .t-geo-badge{font-size:10px;background:rgba(34,211,238,.1);color:#22d3ee;padding:2px 7px;border-radius:5px;font-weight:500;white-space:nowrap}
 .t-nicho-badge{font-size:10px;background:rgba(167,139,250,.12);color:#a78bfa;padding:2px 7px;border-radius:5px;font-weight:500;white-space:nowrap}
@@ -2178,7 +2296,7 @@ tbody tr:hover td{background:var(--surface2)}
 <div class="tbl-panel">
   <table>
     <thead><tr>
-      <th>#</th><th>Bibliotecas</th><th>Descoberta</th><th>Inicial</th><th>Atual</th><th>Última Checagem</th>
+      <th>#</th><th>Brand (Marca)</th><th>Bibliotecas</th><th>Descoberta</th><th>Inicial</th><th>Atual</th><th>Última Checagem</th>
       <th>Δ Total</th><th>Tendência</th><th>Participação</th><th>3 dias</th><th>Instagram</th>
     </tr></thead>
     <tbody id="pag_tbody"></tbody>
@@ -2211,7 +2329,7 @@ tbody tr:hover td{background:var(--surface2)}
 <div class="tbl-panel">
   <table>
     <thead><tr>
-      <th>#</th><th>Domínios</th><th>Descoberta</th><th>Inicial</th><th>Atual</th><th>Última Checagem</th>
+      <th>#</th><th>Brand (Marca)</th><th>Domínios</th><th>Descoberta</th><th>Inicial</th><th>Atual</th><th>Última Checagem</th>
       <th>Δ Total</th><th>Tendência</th><th>Participação</th><th>3 dias</th><th>Instagram</th>
     </tr></thead>
     <tbody id="dom_tbody"></tbody>
@@ -2365,6 +2483,11 @@ porAds.forEach((pag,idx)=>{
   const metaBadgesHtml=(geoBadge||nichoBadge||funilBadge)?'<div class="t-meta-badges">'+geoBadge+nichoBadge+funilBadge+'</div>':'';
   const nomeCell='<span class="t-name-main"><a href="'+(ultima[pag]?.url||'#')+'" target="_blank" rel="noopener" class="lib-link">'+pag+'</a></span>'+metaBadgesHtml;
 
+  // Célula de Brand (Marca)
+  const brandCell=m.brand
+    ?'<span class="t-brand" style="color:#fbbf24;font-weight:700">🏢 '+m.brand+'</span>'
+    :'<span style="color:var(--muted)">—</span>';
+
   // Célula do Instagram
   const igCell=m.instagram_url
     ?'<a href="'+m.instagram_url+'" target="_blank" rel="noopener" class="ig-link" title="Ver Instagram">'+IG_SVG+'</a>'
@@ -2373,6 +2496,7 @@ porAds.forEach((pag,idx)=>{
   const tr=document.createElement("tr");
   tr.innerHTML=
     '<td class="mono" data-label="#" style="color:var(--muted)">'+(idx+1)+'</td>'
+    +'<td class="t-brand" data-label="Marca">'+brandCell+'</td>'
     +'<td class="t-name" data-label="Nome">'+nomeCell+'</td>'
     +'<td data-label="Descoberta" style="color:var(--muted)">'+did+'</td>'
     +'<td class="mono" data-label="Inicial">'+x.ini+'</td>'

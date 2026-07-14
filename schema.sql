@@ -18,7 +18,18 @@ CREATE TABLE IF NOT EXISTS pages (
   geo           TEXT,                           -- Região/País de atuação
   nicho         TEXT,                           -- Segmento/Nicho da marca
   funil         TEXT,                           -- Rótulo do funil associado
+  brand         TEXT,                           -- Nome da marca DTC associada
   created_at    TIMESTAMP NOT NULL DEFAULT NOW()
+);
+
+-- ----------------------------------------------------------------------------
+-- TABELA DE MARCAS (BRANDS DTC)
+-- ----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS brands (
+  id           SERIAL PRIMARY KEY,
+  nome         TEXT UNIQUE NOT NULL,
+  site         TEXT,
+  created_at   TIMESTAMP NOT NULL DEFAULT NOW()
 );
 
 -- ----------------------------------------------------------------------------
